@@ -77,7 +77,21 @@ def generate(state: AgentState) -> dict:
     call coder.invoke(prompt) and return a partial state update:
     {"code": ..., "attempts": attempts + 1, "feedback": None}
     """
-    raise NotImplementedError("TODO 1")
+    attempts = state.get("attempts", 0) + 1
+    parts = [f"Task:\n{state['task']}"]
+    if state.get("code"):
+        parts.append(f"Previous code:\n{state['code']}")
+    if state.get("error"):
+        parts.append(f"It failed the tests with:\n{state['error']}")
+    if state.get("reflection"):
+        parts.append(f"Analysis of the failure:\n{state['reflection']}")
+    if state.get("feedback"):
+        parts.append(f"Reviewer feedback:\n{state['feedback']}")
+    parts.append("Return only the function. Fix every problem mentioned above.")
+
+    sol = coder.invoke("\n\n".join(parts))
+    print(f"\n[generate #{attempts}] {sol.explanation}")
+    return {"code": sol.code, "attempts": attempts, "feedback": None}
 
 
 # ── TODO 2: test + routing ───────────────────────────────────────────────────
@@ -85,18 +99,36 @@ def test(state: AgentState) -> dict:
     """exec(state["code"], ns); exec(TESTS, ns) in one shared dict ns.
     Failed → {"error": traceback.format_exc(limit=1)}, passed → {"error": None}
     """
-    raise NotImplementedError("TODO 2")
+    ns: dict = {}
+    try:
+        exec(state["code"], ns)
+        exec(TESTS, ns)
+    except Exception:
+        error = traceback.format_exc(limit=1)
+        print(f"[test] failed:\n{error}")
+        return {"error": error}
+    print("[test] passed")
+    return {"error": None}
 
 
 def after_test(state: AgentState) -> Literal["human_review", "reflect", "__end__"]:
     """No error → "human_review"; attempts >= MAX_ATTEMPTS → END; otherwise → "reflect"."""
-    raise NotImplementedError("TODO 2 / TODO 3")
+    if state.get("error") is None:
+        return "human_review"
+    if state.get("attempts", 0) >= MAX_ATTEMPTS:
+        return END
+    return "reflect"
 
 
 # ── TODO 3: reflect ──────────────────────────────────────────────────────────
 def reflect(state: AgentState) -> dict:
     """Ask the llm to briefly explain why the code failed. Return {"reflection": msg.text}."""
-    raise NotImplementedError("TODO 3")
+    msg = llm.invoke(
+        f"Task:\n{state['task']}\n\nCode:\n{state['code']}\n\nTest error:\n{state['error']}\n\n"
+        "In 2-3 sentences explain why the code failed and what exactly must change. Do not write code."
+    )
+    print(f"[reflect] {msg.text}")
+    return {"reflection": msg.text}
 
 
 # ── TODO 4: human-in-the-loop ────────────────────────────────────────────────
@@ -105,7 +137,10 @@ def human_review(state: AgentState) -> Command[Literal["generate", "__end__"]]:
     yes → Command(goto=END)
     otherwise → Command(goto="generate", update={"feedback": answer, "error": None, "reflection": None})
     """
-    raise NotImplementedError("TODO 4")
+    answer = interrupt({"code": state["code"], "question": "Accept the code? (yes / your feedback)"})
+    if answer.strip().lower() in ("yes", "y"):
+        return Command(goto=END)
+    return Command(goto="generate", update={"feedback": answer, "error": None, "reflection": None})
 
 
 # ── Graph (uncomment edges as your nodes become ready) ───────────────────────
@@ -116,9 +151,9 @@ builder.add_node("reflect", reflect)
 builder.add_node("human_review", human_review)
 builder.add_edge(START, "generate")
 builder.add_edge("generate", "test")
-# TODO 2: builder.add_conditional_edges("test", after_test)
-# TODO 3: builder.add_edge("reflect", "generate")
-graph = builder.compile()   # TODO 4: compile(checkpointer=InMemorySaver())
+builder.add_conditional_edges("test", after_test)
+builder.add_edge("reflect", "generate")
+graph = builder.compile(checkpointer=InMemorySaver())
 
 
 def run() -> None:
